@@ -44,7 +44,7 @@ steps:
       - '--no-allow-unauthenticated'
       - '--iap'
       - '--service-account=adk-rlm-runner@$PROJECT_ID.iam.gserviceaccount.com'
-      - '--set-env-vars=RLM_MODEL=gemini-3-pro-preview,RLM_MAX_ITERATIONS=30'
+      - '--set-env-vars=RLM_MODEL=gemini/gemini-1.5-flash,RLM_MAX_ITERATIONS=30'
 
 substitutions:
   _REGION: us-central1

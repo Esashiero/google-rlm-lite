@@ -17,15 +17,11 @@ from typing import AsyncGenerator
 from typing import TYPE_CHECKING
 import uuid
 
-from google.genai import types
-
-from google import genai
-
 logger = logging.getLogger(__name__)
 from adk_rlm.events import RLMEventData
 from adk_rlm.events import RLMEventType
-from adk_rlm.llm import AsyncLLMRateLimiter
-from adk_rlm.llm import llm_rate_limit
+from adk_rlm.litellm_client import LiteLLMClient
+from adk_rlm.rate_limiter import get_rate_limiter
 from adk_rlm.repl.local_repl import LocalREPL
 from adk_rlm.usage import UsageTracker
 from google.adk.agents.invocation_context import InvocationContext
@@ -60,7 +56,7 @@ class RLMCodeExecutor(BaseCodeExecutor):
   ]
 
   # Private attributes (not part of the Pydantic schema)
-  _sub_model: str = PrivateAttr(default="gemini-3-flash-preview")
+  _sub_model: str = PrivateAttr(default="gemini/gemini-1.5-flash")
   _current_depth: int = PrivateAttr(default=0)
   _max_depth: int = PrivateAttr(default=5)
   _max_iterations: int = PrivateAttr(default=30)
@@ -86,7 +82,7 @@ class RLMCodeExecutor(BaseCodeExecutor):
 
   def __init__(
       self,
-      sub_model: str = "gemini-3-flash-preview",
+      sub_model: str = "gemini/gemini-1.5-flash",
       current_depth: int = 0,
       max_depth: int = 5,
       max_iterations: int = 30,
@@ -178,20 +174,8 @@ class RLMCodeExecutor(BaseCodeExecutor):
       batch_index: int | None = None,
       batch_size: int | None = None,
   ) -> str:
-    """Make a simple LLM call without code execution capability.
+    """Make a simple LLM call with rate limiting and retry logic."""
 
-    Emits SUB_LLM_START and SUB_LLM_END events for UI visibility and logs
-    the call to the JSONL logger.
-
-    Args:
-        prompt: The prompt to send to the LLM.
-        model: The model to use.
-        batch_index: Position within a batch (0-indexed), if part of a batch.
-        batch_size: Total number of items in the batch, if part of a batch.
-
-    Returns:
-        The LLM's response text, or an error message if the call failed.
-    """
     # Emit start event
     self._emit_sub_llm_event(
         RLMEventType.SUB_LLM_START,
@@ -206,57 +190,27 @@ class RLMCodeExecutor(BaseCodeExecutor):
     response_text = None
 
     try:
-      # Create a fresh client for each simple LLM call to avoid
-      # "Event loop is closed" errors when called from thread pool.
-      # A shared client may hold references to an event loop that
-      # is no longer valid in this thread context.
-      client = genai.Client(vertexai=True, location="global")
-      # Disable function calling to prevent MALFORMED_FUNCTION_CALL errors
-      config = types.GenerateContentConfig(
-          tool_config=types.ToolConfig(
-              function_calling_config=types.FunctionCallingConfig(mode="NONE")
-          )
-      )
-      with llm_rate_limit():
-        response = client.models.generate_content(
+        # Create LiteLLM client
+        client = LiteLLMClient(
             model=model,
-            contents=prompt,
-            config=config,
-        )
-      self._usage_tracker.add_from_response(model, response.usage_metadata)
-
-      # Handle None/empty responses with detailed logging
-      if response.text is None or response.text == "":
-        finish_reason = None
-        block_reason = None
-        if response.candidates:
-          finish_reason = getattr(response.candidates[0], "finish_reason", None)
-        if hasattr(response, "prompt_feedback"):
-          block_reason = getattr(response.prompt_feedback, "block_reason", None)
-
-        logger.warning(
-            "Simple LLM call returned empty response: model=%s, "
-            "finish_reason=%s, block_reason=%s, prompt_preview=%s",
-            model,
-            finish_reason,
-            block_reason,
-            prompt[:100] if prompt else None,
+            max_retries=5,
+            base_retry_delay=1.0,
         )
 
-        reason_parts = []
-        if finish_reason:
-          reason_parts.append(f"finish_reason={finish_reason}")
-        if block_reason:
-          reason_parts.append(f"block_reason={block_reason}")
-        reason_str = (
-            ", ".join(reason_parts) if reason_parts else "unknown reason"
-        )
-        response_text = f"[LLM returned empty response: {reason_str}]"
-      else:
-        response_text = response.text
+        response = client.completion(prompt=prompt)
+        response_text = response.choices[0].message.content
+
+        # Track usage
+        if hasattr(response, "usage") and response.usage:
+            self._usage_tracker.add(
+                model,
+                input_tokens=getattr(response.usage, "prompt_tokens", 0),
+                output_tokens=getattr(response.usage, "completion_tokens", 0)
+            )
+
     except Exception as e:
-      error_msg = str(e)
-      response_text = f"Error: LLM query failed - {e}"
+        error_msg = str(e)
+        response_text = f"Error: LLM query failed - {e}"
 
     execution_time_ms = (time.perf_counter() - start_time) * 1000
 
@@ -572,128 +526,28 @@ class RLMCodeExecutor(BaseCodeExecutor):
         # Parallel recursive execution using ThreadPoolExecutor
         return self._run_parallel_recursive(prompts, contexts, target_model)
 
-      # Simple async batched calls (no recursion) - emit events for each query
-      batch_size = len(prompts)
-
-      # Capture references needed in the async functions
-      usage_tracker = self._usage_tracker
-      emit_event = self._emit_sub_llm_event
-      log_call = self._log_simple_llm_call
-
-      async def query_single(
-          client: genai.Client, prompt: str, batch_index: int
-      ) -> str:
-        # Emit start event
-        emit_event(
-            RLMEventType.SUB_LLM_START,
-            model=target_model,
-            prompt=prompt,
-            batch_index=batch_index,
-            batch_size=batch_size,
-        )
-
-        start_time = time.perf_counter()
-        error_msg = None
-        response_text = None
-
-        try:
-          # Disable function calling to prevent MALFORMED_FUNCTION_CALL errors
-          config = types.GenerateContentConfig(
-              tool_config=types.ToolConfig(
-                  function_calling_config=types.FunctionCallingConfig(
-                      mode="NONE"
-                  )
-              )
-          )
-          async with AsyncLLMRateLimiter():
-            response = await client.aio.models.generate_content(
-                model=target_model,
-                contents=prompt,
-                config=config,
-            )
-          usage_tracker.add_from_response(target_model, response.usage_metadata)
-
-          # Handle None/empty responses with detailed logging
-          if response.text is None or response.text == "":
-            finish_reason = None
-            block_reason = None
-            if response.candidates:
-              finish_reason = getattr(
-                  response.candidates[0], "finish_reason", None
-              )
-            if hasattr(response, "prompt_feedback"):
-              block_reason = getattr(
-                  response.prompt_feedback, "block_reason", None
-              )
-
-            logger.warning(
-                "Batched LLM call returned empty response: model=%s, "
-                "batch_index=%s/%s, finish_reason=%s, block_reason=%s",
-                target_model,
-                batch_index,
-                batch_size,
-                finish_reason,
-                block_reason,
-            )
-
-            reason_parts = []
-            if finish_reason:
-              reason_parts.append(f"finish_reason={finish_reason}")
-            if block_reason:
-              reason_parts.append(f"block_reason={block_reason}")
-            reason_str = (
-                ", ".join(reason_parts) if reason_parts else "unknown reason"
-            )
-            response_text = f"[LLM returned empty response: {reason_str}]"
-          else:
-            response_text = response.text
-        except Exception as e:
-          error_msg = str(e)
-          response_text = f"Error: LLM query failed - {e}"
-
-        execution_time_ms = (time.perf_counter() - start_time) * 1000
-
-        # Emit end event
-        emit_event(
-            RLMEventType.SUB_LLM_END,
-            model=target_model,
-            response=response_text if not error_msg else None,
-            error=error_msg,
-            execution_time_ms=execution_time_ms,
-            batch_index=batch_index,
-            batch_size=batch_size,
-        )
-
-        # Log to JSONL
-        log_call(
-            prompt=prompt,
-            response=response_text,
-            model=target_model,
-            execution_time_ms=execution_time_ms,
-            batch_index=batch_index,
-            batch_size=batch_size,
-            error=error_msg,
-        )
-
-        return response_text
-
       async def run_all():
-        # Create a fresh client in this event loop to avoid
-        # "Event loop is closed" errors from cross-thread usage
-        client = genai.Client(vertexai=True, location="global")
-        tasks = [query_single(client, p, i) for i, p in enumerate(prompts)]
-        return await asyncio.gather(*tasks)
+          """Run all queries with proper rate limiting."""
+          client = LiteLLMClient(
+              model=target_model,
+              max_retries=5,
+              base_retry_delay=1.0,
+          )
 
-      # Run in a new event loop if we're not already in one
+          # Use the batched completion which handles rate limiting internally
+          return await client.acompletion_batched(
+              prompts=prompts,
+              temperature=0.7,
+          )
+
+      # Run with proper event loop handling
       try:
-        asyncio.get_running_loop()
-        # If we're in a running loop, create a new one in a thread
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-          future = pool.submit(asyncio.run, run_all())
-          return future.result()
+          asyncio.get_running_loop()
+          with concurrent.futures.ThreadPoolExecutor() as pool:
+              future = pool.submit(asyncio.run, run_all())
+              return future.result()
       except RuntimeError:
-        # No running loop, safe to use asyncio.run
-        return asyncio.run(run_all())
+          return asyncio.run(run_all())
 
     return llm_query_batched
 

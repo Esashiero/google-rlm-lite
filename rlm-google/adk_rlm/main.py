@@ -42,7 +42,7 @@ class RLM:
       from adk_rlm import RLM, completion
 
       # Streaming API for real-time UI updates
-      rlm = RLM(model="gemini-3-pro-preview")
+      rlm = RLM(model="gemini/gemini-1.5-flash")
 
       async for event in rlm.run_streaming(context, prompt):
           event_type = event.custom_metadata.get("event_type")
@@ -60,7 +60,7 @@ class RLM:
 
   def __init__(
       self,
-      model: str = "gemini-3-pro-preview",
+      model: str = "gemini/gemini-1.5-flash",
       sub_model: str | None = None,
       max_iterations: int = 30,
       max_depth: int = 5,
@@ -81,7 +81,7 @@ class RLM:
     Initialize the RLM.
 
     Args:
-        model: The main model to use (default: gemini-3-pro-preview).
+        model: The main model to use (default: gemini/gemini-1.5-flash).
         sub_model: The model for recursive sub-calls (defaults to model).
         max_iterations: Maximum number of RLM iterations (default: 30).
         max_depth: Maximum recursion depth (default: 5).
@@ -99,7 +99,7 @@ class RLM:
     if (
         backend_kwargs
         and "model_name" in backend_kwargs
-        and model == "gemini-3-pro-preview"
+        and model == "gemini/gemini-1.5-flash"
     ):
       model = backend_kwargs["model_name"]
 
@@ -268,7 +268,7 @@ def completion(
     prompt: str | None = None,
     *,
     files: list[str] | None = None,
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini/gemini-1.5-flash",
     sub_model: str | None = None,
     max_iterations: int = 30,
     max_depth: int = 5,
@@ -285,7 +285,7 @@ def completion(
       context: The context/data to analyze.
       prompt: Optional user prompt/question about the context.
       files: List of file paths/URIs/globs to load as context.
-      model: The main model to use (default: gemini-3-pro-preview).
+      model: The main model to use (default: gemini/gemini-1.5-flash).
       sub_model: The model for recursive sub-calls (defaults to model).
       max_iterations: Maximum number of RLM iterations (default: 30).
       max_depth: Maximum recursion depth (default: 5).

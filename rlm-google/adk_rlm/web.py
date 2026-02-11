@@ -38,7 +38,7 @@ TEMPLATE_DIR.mkdir(exist_ok=True)
 DEFAULT_DB_URL = os.environ.get(
     "RLM_DB_URL", "sqlite+aiosqlite:///./sessions.db"
 )
-DEFAULT_MODEL = os.environ.get("RLM_MODEL", "gemini-3-pro-preview")
+DEFAULT_MODEL = os.environ.get("RLM_MODEL", "gemini/gemini-1.5-flash")
 DEFAULT_SUB_MODEL = os.environ.get("RLM_SUB_MODEL")
 DEFAULT_MAX_ITERATIONS = int(os.environ.get("RLM_MAX_ITERATIONS", "30"))
 DEFAULT_LOG_DIR = os.environ.get("RLM_LOG_DIR", "./logs")
@@ -122,7 +122,7 @@ def get_or_create_rlm(session: Session) -> RLM:
   """Get or create an RLM instance for a session."""
   if session.id not in active_rlm:
     # Get config from session state
-    model = session.state.get("model", "gemini-3-pro-preview")
+    model = session.state.get("model", "gemini/gemini-1.5-flash")
     sub_model = session.state.get("sub_model")
     max_iterations = session.state.get("max_iterations", 30)
     log_dir = session.state.get("log_dir", "./logs")
@@ -313,7 +313,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
           session_id=session_id,
           state={
               "title": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-              "model": "gemini-3-pro-preview",
+              "model": "gemini/gemini-1.5-flash",
               "sub_model": None,
               "max_iterations": 30,
               "files": [],
@@ -388,10 +388,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "type": "status_response",
             "session_id": session.id,
             "title": session.state.get("title", "Untitled"),
-            "model": session.state.get("model", "gemini-3-pro-preview"),
+            "model": session.state.get("model", "gemini/gemini-1.5-flash"),
             "sub_model": (
                 session.state.get("sub_model")
-                or session.state.get("model", "gemini-3-pro-preview")
+                or session.state.get("model", "gemini/gemini-1.5-flash")
             ),
             "max_iterations": session.state.get("max_iterations", 30),
             "files": session.state.get("files", []),
@@ -413,7 +413,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "type": "session_loaded",
                 "session_id": session.id,
                 "title": session.state.get("title", "Untitled"),
-                "model": session.state.get("model", "gemini-3-pro-preview"),
+                "model": session.state.get("model", "gemini/gemini-1.5-flash"),
                 "sub_model": (
                     session.state.get("sub_model") or session.state.get("model")
                 ),
@@ -437,7 +437,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             session_id=new_session_id,
             state={
                 "title": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                "model": "gemini-3-pro-preview",
+                "model": "gemini/gemini-1.5-flash",
                 "sub_model": None,
                 "max_iterations": 30,
                 "files": [],
@@ -656,7 +656,7 @@ async def run_query(websocket: WebSocket, session: Session, prompt: str):
 
 
 def create_app(
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini/gemini-1.5-flash",
     sub_model: str | None = None,
     max_iterations: int = 30,
     log_dir: str | None = None,
@@ -703,8 +703,8 @@ def main():
       "--model",
       "-m",
       type=str,
-      default="gemini-3-pro-preview",
-      help="Default model (default: gemini-3-pro-preview)",
+      default="gemini/gemini-1.5-flash",
+      help="Default model (default: gemini/gemini-1.5-flash)",
   )
   parser.add_argument(
       "--sub-model",

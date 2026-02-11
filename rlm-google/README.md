@@ -1,6 +1,6 @@
 # ADK-RLM
 
-A Python implementation of Recursive Language Models (RLM) using Google's Agent Development Kit (ADK) and Gemini models.
+A Python implementation of Recursive Language Models (RLM) using Google's Agent Development Kit (ADK) and LiteLLM with Gemini models.
 
 RLM enables LLMs to handle near-infinite length contexts by programmatically examining, decomposing, and recursively calling themselves through a REPL environment.
 
@@ -81,8 +81,8 @@ from adk_rlm import completion
 result = completion(
     context="Your document or data here...",
     prompt="What patterns do you see in the data?",
-    model="gemini-3-flash-preview",
-    sub_model="gemini-3-flash-preview",
+    model="gemini/gemini-1.5-flash",
+    sub_model="gemini/gemini-1.5-flash",
     max_iterations=10,
     verbose=True,  # Show Rich console output
 )
@@ -100,7 +100,7 @@ import asyncio
 from adk_rlm import RLM, RLMEventType
 
 async def main():
-    rlm = RLM(model="gemini-3-flash-preview")
+    rlm = RLM(model="gemini/gemini-1.5-flash")
 
     async for event in rlm.run_streaming(context, prompt):
         event_type = event.custom_metadata.get("event_type")
@@ -134,7 +134,7 @@ async def run_query(rlm, context, prompt):
 
 async def main():
     rlm = RLM(
-        model="gemini-3-flash-preview",
+        model="gemini/gemini-1.5-flash",
         persistent=True,  # Enable multi-turn persistence
     )
 
@@ -303,5 +303,5 @@ gcloud storage rm -r "gs://${BUCKET_NAME}"
 
 - Python 3.10+
 - Google Cloud authentication (application default credentials)
-- Access to Gemini models (gemini-3-flash-preview, gemini-3-pro-preview)
+- Access to LiteLLM with Gemini models (gemini/gemini-1.5-flash, gemini/gemini-1.5-flash)
 
