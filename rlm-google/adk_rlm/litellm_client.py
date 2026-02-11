@@ -48,7 +48,7 @@ class LiteLLMClient:
 
         # Determine provider
         try:
-            self.provider = litellm.get_llm_provider(model)[0]
+            self.provider = litellm.get_llm_provider(model)[1]
         except Exception:
             self.provider = "default"
 
@@ -117,6 +117,9 @@ class LiteLLMClient:
         """
         Make an async completion call with rate limiting and retries.
         """
+        from adk_rlm.rate_limiter import get_rate_limiter
+        limiter = get_rate_limiter(self.provider)
+
         if messages is None:
             messages = []
             if system_prompt:
@@ -131,7 +134,8 @@ class LiteLLMClient:
 
         for attempt in range(self.max_retries):
             try:
-                async with await rate_limit_async(provider=self.provider, timeout=120):
+                logger.debug(f"Acquiring rate limit for {self.provider} - tokens available: {limiter._tokens:.2f}")
+                async with await limiter.acquire_async(timeout=120):
                     try:
                         response = await litellm.acompletion(
                             model=self.model,
@@ -165,17 +169,25 @@ class LiteLLMClient:
         prompts: list[str],
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        stagger: float = 0.1,  # Added stagger to prevent initial burst
+        stagger: Optional[float] = None,
         **kwargs
     ) -> list[str]:
         """
         Make batched async completion calls with rate limiting and staggering.
         """
+        if stagger is None:
+            from adk_rlm.rate_limiter import get_rate_limiter
+            limiter = get_rate_limiter(self.provider)
+            # Calculate stagger: 60 / RPM gives seconds per request
+            # Use a slightly higher value (66 instead of 60) for safety
+            stagger = 66.0 / limiter.requests_per_minute
+            logger.debug(f"Calculated stagger for {self.provider}: {stagger:.2f}s (RPM: {limiter.requests_per_minute})")
+
         results = [None] * len(prompts)
 
         async def query_one(prompt: str, idx: int):
             # Add a small stagger based on index to prevent simultaneous bursts
-            if stagger > 0:
+            if stagger and stagger > 0:
                 await asyncio.sleep(idx * stagger)
 
             try:
