@@ -4,6 +4,7 @@ LiteLLM client wrapper with rate limiting and retry logic.
 
 import asyncio
 import time
+import logging
 from typing import Any, List, Optional, Dict
 
 import litellm
@@ -11,6 +12,7 @@ from litellm.exceptions import RateLimitError
 
 from adk_rlm.rate_limiter import rate_limit, rate_limit_async
 
+logger = logging.getLogger(__name__)
 
 class LiteLLMClient:
     """
@@ -44,6 +46,12 @@ class LiteLLMClient:
         self.max_retries = max_retries
         self.base_retry_delay = base_retry_delay
 
+        # Determine provider
+        try:
+            self.provider = litellm.get_llm_provider(model)[0]
+        except Exception:
+            self.provider = "default"
+
     def completion(
         self,
         prompt: Optional[str] = None,
@@ -54,16 +62,6 @@ class LiteLLMClient:
     ) -> Any:
         """
         Make a completion call with rate limiting and retries.
-
-        Args:
-            prompt: User prompt (ignored if messages provided)
-            messages: List of message dictionaries
-            system_prompt: Optional system prompt (prepended to messages)
-            temperature: Sampling temperature
-            **kwargs: Additional arguments for litellm
-
-        Returns:
-            LiteLLM response object
         """
         if messages is None:
             messages = []
@@ -72,36 +70,40 @@ class LiteLLMClient:
             if prompt:
                 messages.append({"role": "user", "content": prompt})
         elif system_prompt:
-            # Check if there's already a system message
             if not messages or messages[0].get("role") != "system":
                 messages = [{"role": "system", "content": system_prompt}] + messages
 
         last_error = None
 
         for attempt in range(self.max_retries):
-            with rate_limit(timeout=60):  # Wait up to 60s for rate limit
-                try:
-                    response = litellm.completion(
-                        model=self.model,
-                        messages=messages,
-                        temperature=temperature,
-                        api_key=self.api_key,
-                        api_base=self.api_base,
-                        **kwargs
-                    )
-                    return response
+            try:
+                with rate_limit(provider=self.provider, timeout=120):
+                    try:
+                        response = litellm.completion(
+                            model=self.model,
+                            messages=messages,
+                            temperature=temperature,
+                            api_key=self.api_key,
+                            api_base=self.api_base,
+                            **kwargs
+                        )
+                        return response
 
-                except RateLimitError as e:
-                    last_error = e
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_retry_delay * (2 ** attempt)
-                        time.sleep(delay)
-                    else:
+                    except RateLimitError as e:
+                        last_error = e
+                        if attempt < self.max_retries - 1:
+                            delay = self.base_retry_delay * (2 ** attempt)
+                            logger.warning(f"Rate limit hit for {self.model}, retrying in {delay}s... (attempt {attempt+1})")
+                            time.sleep(delay)
+                        else:
+                            raise
+                    except Exception as e:
+                        logger.error(f"Unexpected error in LiteLLMClient.completion: {e}")
                         raise
-                except Exception:
-                    raise
+            except TimeoutError as e:
+                logger.error(f"Rate limit acquisition timed out: {e}")
+                raise
 
-        # Should not reach here, but just in case
         raise last_error or Exception("Max retries exceeded")
 
     async def acompletion(
@@ -114,16 +116,6 @@ class LiteLLMClient:
     ) -> Any:
         """
         Make an async completion call with rate limiting and retries.
-
-        Args:
-            prompt: User prompt (ignored if messages provided)
-            messages: List of message dictionaries
-            system_prompt: Optional system prompt (prepended to messages)
-            temperature: Sampling temperature
-            **kwargs: Additional arguments for litellm
-
-        Returns:
-            LiteLLM response object
         """
         if messages is None:
             messages = []
@@ -132,34 +124,39 @@ class LiteLLMClient:
             if prompt:
                 messages.append({"role": "user", "content": prompt})
         elif system_prompt:
-            # Check if there's already a system message
             if not messages or messages[0].get("role") != "system":
                 messages = [{"role": "system", "content": system_prompt}] + messages
 
         last_error = None
 
         for attempt in range(self.max_retries):
-            async with await rate_limit_async(timeout=60):
-                try:
-                    response = await litellm.acompletion(
-                        model=self.model,
-                        messages=messages,
-                        temperature=temperature,
-                        api_key=self.api_key,
-                        api_base=self.api_base,
-                        **kwargs
-                    )
-                    return response
+            try:
+                async with await rate_limit_async(provider=self.provider, timeout=120):
+                    try:
+                        response = await litellm.acompletion(
+                            model=self.model,
+                            messages=messages,
+                            temperature=temperature,
+                            api_key=self.api_key,
+                            api_base=self.api_base,
+                            **kwargs
+                        )
+                        return response
 
-                except RateLimitError as e:
-                    last_error = e
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_retry_delay * (2 ** attempt)
-                        await asyncio.sleep(delay)
-                    else:
+                    except RateLimitError as e:
+                        last_error = e
+                        if attempt < self.max_retries - 1:
+                            delay = self.base_retry_delay * (2 ** attempt)
+                            logger.warning(f"Rate limit hit for {self.model}, retrying in {delay}s... (attempt {attempt+1})")
+                            await asyncio.sleep(delay)
+                        else:
+                            raise
+                    except Exception as e:
+                        logger.error(f"Unexpected error in LiteLLMClient.acompletion: {e}")
                         raise
-                except Exception:
-                    raise
+            except TimeoutError as e:
+                logger.error(f"Rate limit acquisition timed out: {e}")
+                raise
 
         raise last_error or Exception("Max retries exceeded")
 
@@ -168,39 +165,32 @@ class LiteLLMClient:
         prompts: list[str],
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
+        stagger: float = 0.1,  # Added stagger to prevent initial burst
         **kwargs
     ) -> list[str]:
         """
-        Make batched async completion calls with rate limiting.
-
-        Args:
-            prompts: List of prompts
-            system_prompt: Optional system prompt (applied to all)
-            temperature: Sampling temperature
-            **kwargs: Additional arguments for litellm
-
-        Returns:
-            List of response texts in same order as prompts
+        Make batched async completion calls with rate limiting and staggering.
         """
-        semaphore = asyncio.Semaphore(30)  # Limit concurrent within batch
+        results = [None] * len(prompts)
 
-        async def query_one(prompt: str, idx: int) -> tuple[int, str]:
-            async with semaphore:
-                try:
-                    response = await self.acompletion(
-                        prompt=prompt,
-                        system_prompt=system_prompt,
-                        temperature=temperature,
-                        **kwargs
-                    )
-                    return (idx, response.choices[0].message.content)
-                except Exception as e:
-                    return (idx, f"Error: {e}")
+        async def query_one(prompt: str, idx: int):
+            # Add a small stagger based on index to prevent simultaneous bursts
+            if stagger > 0:
+                await asyncio.sleep(idx * stagger)
 
-        # Create tasks for all prompts
+            try:
+                response = await self.acompletion(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    **kwargs
+                )
+                results[idx] = response.choices[0].message.content
+            except Exception as e:
+                results[idx] = f"Error: {e}"
+
+        # We still use gather but query_one now has an internal stagger
         tasks = [query_one(p, i) for i, p in enumerate(prompts)]
-        results = await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks)
 
-        # Sort by index and return just the results
-        results.sort(key=lambda x: x[0])
-        return [r[1] for r in results]
+        return results

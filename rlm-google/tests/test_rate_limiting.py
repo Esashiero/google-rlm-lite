@@ -5,7 +5,7 @@ import time
 import pytest
 from unittest.mock import Mock, patch
 
-from adk_rlm.rate_limiter import TokenBucketRateLimiter, get_rate_limiter, reset_rate_limiter
+from adk_rlm.rate_limiter import TokenBucketRateLimiter, get_rate_limiter, reset_rate_limiters
 
 
 class TestTokenBucketRateLimiter:
@@ -88,7 +88,7 @@ class TestRateLimiterIntegration:
 
     def test_global_rate_limiter_singleton(self):
         """Test that global rate limiter is a singleton."""
-        reset_rate_limiter()
+        reset_rate_limiters()
 
         limiter1 = get_rate_limiter()
         limiter2 = get_rate_limiter()
@@ -164,3 +164,24 @@ class TestRetryLogic:
             client.completion(prompt="Test")
 
         assert mock_completion.call_count == 2
+
+class TestProviderSpecificLimits:
+    """Test provider-specific rate limit support."""
+
+    def test_provider_registry(self):
+        """Test that different providers get different limiters."""
+        reset_rate_limiters()
+
+        limiter1 = get_rate_limiter("gemini")
+        limiter2 = get_rate_limiter("mistral")
+
+        assert limiter1 is not limiter2
+        assert limiter1.requests_per_minute == 60
+        assert limiter2.requests_per_minute == 30
+
+    def test_default_provider(self):
+        """Test that unknown provider gets default limits."""
+        reset_rate_limiters()
+
+        limiter = get_rate_limiter("unknown")
+        assert limiter.requests_per_minute == 60

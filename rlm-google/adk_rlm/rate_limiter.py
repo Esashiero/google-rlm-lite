@@ -15,10 +15,9 @@ class TokenBucketRateLimiter:
     """
     Token bucket rate limiter that enforces both concurrent and RPM limits.
 
-    For Gemini's 60rpm limit:
-    - tokens_per_minute = 60
-    - refill_rate = 60/60 = 1 token per second
-    - max_burst = 5 (allow small bursts)
+    Order of operations:
+    1. Acquire rate limit token (throttles frequency)
+    2. Acquire concurrency semaphore (throttles simultaneous calls)
     """
 
     def __init__(
@@ -32,7 +31,7 @@ class TokenBucketRateLimiter:
         self.max_burst = max_burst
 
         # Token bucket for RPM limiting
-        self._tokens = max_burst
+        self._tokens = float(max_burst)
         self._last_refill = time.monotonic()
         self._token_lock = threading.Lock()
 
@@ -48,7 +47,7 @@ class TokenBucketRateLimiter:
         elapsed = now - self._last_refill
         tokens_to_add = elapsed * self._refill_rate
 
-        self._tokens = min(self.max_burst, self._tokens + tokens_to_add)
+        self._tokens = min(float(self.max_burst), self._tokens + tokens_to_add)
         self._last_refill = now
 
     def _acquire_token(self, timeout: Optional[float] = None) -> bool:
@@ -63,12 +62,12 @@ class TokenBucketRateLimiter:
             with self._token_lock:
                 self._refill_tokens()
 
-                if self._tokens >= 1:
-                    self._tokens -= 1
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
                     return True
 
                 # Calculate wait time for next token
-                tokens_needed = 1 - self._tokens
+                tokens_needed = 1.0 - self._tokens
                 wait_time = tokens_needed / self._refill_rate
 
             # Check timeout
@@ -84,44 +83,30 @@ class TokenBucketRateLimiter:
     def acquire(self, timeout: Optional[float] = None):
         """
         Context manager to acquire both concurrent slot and RPM token.
-
-        Usage:
-            with rate_limiter.acquire():
-                # Make LLM call
-                response = client.completion(...)
         """
         acquired_semaphore = False
         acquired_token = False
 
         try:
-            # First acquire semaphore (concurrent limit)
-            if not self._semaphore.acquire(timeout=timeout):
-                raise TimeoutError("Could not acquire concurrent request slot")
-            acquired_semaphore = True
-
-            # Then acquire token (RPM limit)
+            # STEP 1: Acquire token FIRST (limits rate)
             if not self._acquire_token(timeout=timeout):
                 raise TimeoutError("Could not acquire rate limit token")
             acquired_token = True
 
+            # STEP 2: Acquire semaphore SECOND (limits concurrency)
+            if not self._semaphore.acquire(timeout=timeout):
+                raise TimeoutError("Could not acquire concurrent request slot")
+            acquired_semaphore = True
+
             yield
 
         finally:
-            # Release in reverse order
-            if acquired_token:
-                # Token is consumed, don't add back
-                pass
             if acquired_semaphore:
                 self._semaphore.release()
 
     async def acquire_async(self, timeout: Optional[float] = None):
         """
         Async context manager to acquire both concurrent slot and RPM token.
-
-        Usage:
-            async with rate_limiter.acquire_async():
-                # Make async LLM call
-                response = await client.acompletion(...)
         """
         return _AsyncRateLimiterContext(self, timeout)
 
@@ -136,7 +121,16 @@ class _AsyncRateLimiterContext:
         self.acquired_token = False
 
     async def __aenter__(self):
-        # Acquire semaphore in thread pool
+        # STEP 1: Acquire token FIRST (limits rate)
+        token_acquired = await asyncio.to_thread(
+            self.limiter._acquire_token,
+            timeout=self.timeout
+        )
+        if not token_acquired:
+            raise TimeoutError("Could not acquire rate limit token")
+        self.acquired_token = True
+
+        # STEP 2: Acquire semaphore SECOND (limits concurrency)
         acquired = await asyncio.to_thread(
             self.limiter._semaphore.acquire,
             timeout=self.timeout
@@ -144,18 +138,6 @@ class _AsyncRateLimiterContext:
         if not acquired:
             raise TimeoutError("Could not acquire concurrent request slot")
         self.acquired_semaphore = True
-
-        # Acquire token in thread pool
-        token_acquired = await asyncio.to_thread(
-            self.limiter._acquire_token,
-            timeout=self.timeout
-        )
-        if not token_acquired:
-            # Release semaphore if token acquisition failed
-            self.limiter._semaphore.release()
-            self.acquired_semaphore = False
-            raise TimeoutError("Could not acquire rate limit token")
-        self.acquired_token = True
 
         return self
 
@@ -165,47 +147,57 @@ class _AsyncRateLimiterContext:
         return False
 
 
-# Global rate limiter instance
-# 60 RPM for Gemini free tier, 30 concurrent, allow burst of 5
-_default_rate_limiter: Optional[TokenBucketRateLimiter] = None
-_rate_limiter_lock = threading.Lock()
+# Global rate limiter registry
+_rate_limiters: dict[str, TokenBucketRateLimiter] = {}
+_registry_lock = threading.Lock()
 
 
-def get_rate_limiter(
-    requests_per_minute: int = 60,
-    max_concurrent: int = 30,
-    max_burst: int = 5,
-) -> TokenBucketRateLimiter:
-    """Get or create the global rate limiter instance."""
-    global _default_rate_limiter
+def get_rate_limiter(provider: str = "default") -> TokenBucketRateLimiter:
+    """Get or create a rate limiter for a specific provider using global config."""
+    global _rate_limiters
 
-    with _rate_limiter_lock:
-        if _default_rate_limiter is None:
-            _default_rate_limiter = TokenBucketRateLimiter(
-                requests_per_minute=requests_per_minute,
-                max_concurrent=max_concurrent,
-                max_burst=max_burst,
+    from adk_rlm.config import get_config
+    config = get_config()
+
+    with _registry_lock:
+        if provider not in _rate_limiters:
+            # Check for provider-specific config
+            if provider in config.provider_configs:
+                p_config = config.provider_configs[provider]
+                rpm = p_config.requests_per_minute
+                concurrent = p_config.max_concurrent
+                burst = p_config.max_burst
+            else:
+                # Use default config
+                rpm = config.requests_per_minute
+                concurrent = config.max_concurrent_requests
+                burst = config.max_burst
+
+            _rate_limiters[provider] = TokenBucketRateLimiter(
+                requests_per_minute=rpm,
+                max_concurrent=concurrent,
+                max_burst=burst,
             )
-        return _default_rate_limiter
+        return _rate_limiters[provider]
 
 
-def reset_rate_limiter():
-    """Reset the global rate limiter (useful for testing)."""
-    global _default_rate_limiter
-    with _rate_limiter_lock:
-        _default_rate_limiter = None
+def reset_rate_limiters():
+    """Reset all rate limiters."""
+    global _rate_limiters
+    with _registry_lock:
+        _rate_limiters = {}
 
 
-# Convenience functions using global limiter
+# Convenience functions
 @contextmanager
-def rate_limit(timeout: Optional[float] = None):
-    """Context manager using global rate limiter."""
-    limiter = get_rate_limiter()
+def rate_limit(provider: str = "default", timeout: Optional[float] = None):
+    """Context manager using global rate limiter registry."""
+    limiter = get_rate_limiter(provider=provider)
     with limiter.acquire(timeout=timeout):
         yield
 
 
-async def rate_limit_async(timeout: Optional[float] = None):
-    """Async context manager using global rate limiter."""
-    limiter = get_rate_limiter()
+async def rate_limit_async(provider: str = "default", timeout: Optional[float] = None):
+    """Async context manager using global rate limiter registry."""
+    limiter = get_rate_limiter(provider=provider)
     return await limiter.acquire_async(timeout=timeout)
