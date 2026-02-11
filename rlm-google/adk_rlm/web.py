@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Optional
 import uuid
 
 # Configure logging
@@ -21,10 +21,8 @@ logger = logging.getLogger("adk_rlm.web")
 
 from adk_rlm import RLM
 from adk_rlm import RLMEventType
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi import WebSocket
-from fastapi import WebSocketDisconnect
+from adk_rlm.config import get_config
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from google.adk.sessions import DatabaseSessionService
@@ -34,13 +32,15 @@ from google.adk.sessions import Session
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 TEMPLATE_DIR.mkdir(exist_ok=True)
 
-# Default configuration (can be overridden via environment or create_app)
+# Default configuration from RLMConfig
+config = get_config()
+
 DEFAULT_DB_URL = os.environ.get(
     "RLM_DB_URL", "sqlite+aiosqlite:///./sessions.db"
 )
-DEFAULT_MODEL = os.environ.get("RLM_MODEL", "gemini/gemini-1.5-flash")
+DEFAULT_MODEL = config.default_model
 DEFAULT_SUB_MODEL = os.environ.get("RLM_SUB_MODEL")
-DEFAULT_MAX_ITERATIONS = int(os.environ.get("RLM_MAX_ITERATIONS", "30"))
+DEFAULT_MAX_ITERATIONS = config.max_iterations
 DEFAULT_LOG_DIR = os.environ.get("RLM_LOG_DIR", "./logs")
 
 # Module-level config that persists across imports
@@ -66,7 +66,6 @@ async def lifespan(app: FastAPI):
     session_service = DatabaseSessionService(db_url=db_url)
 
   # Warm up the database connection by doing a simple query
-  # This ensures the first WebSocket connection doesn't have to wait
   logger.info("Warming up database connection...")
   try:
     await session_service.list_sessions(
@@ -122,9 +121,9 @@ def get_or_create_rlm(session: Session) -> RLM:
   """Get or create an RLM instance for a session."""
   if session.id not in active_rlm:
     # Get config from session state
-    model = session.state.get("model", "gemini/gemini-1.5-flash")
+    model = session.state.get("model", DEFAULT_MODEL)
     sub_model = session.state.get("sub_model")
-    max_iterations = session.state.get("max_iterations", 30)
+    max_iterations = session.state.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     log_dir = session.state.get("log_dir", "./logs")
 
     active_rlm[session.id] = RLM(
@@ -230,11 +229,8 @@ async def update_session_state(
 ) -> Session:
   """
   Update session state and persist to database.
-
-  This is a convenience wrapper that updates state via a no-op event.
   """
-  from google.adk.events import Event
-  from google.adk.events import EventActions
+  from google.adk.events import Event, EventActions
 
   # Update in-memory state
   session.state.update(state_updates)
@@ -271,13 +267,10 @@ async def health():
     if session_service is None:
       return {"status": "error", "message": "session_service is None"}
 
-    # Try a simple operation
-    logger.info("Health check: testing session service...")
     sessions = await session_service.list_sessions(
         app_name=APP_NAME,
         user_id=DEFAULT_USER_ID,
     )
-    logger.info(f"Health check: got {len(sessions.sessions)} sessions")
     return {
         "status": "ok",
         "session_service": str(type(session_service)),
@@ -302,26 +295,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         user_id=DEFAULT_USER_ID,
         session_id=session_id,
     )
-    logger.info(f"Got session: {session}")
 
     if session is None:
       # Create new session with default state
-      logger.info(f"Creating new session: {session_id}")
       session = await session_service.create_session(
           app_name=APP_NAME,
           user_id=DEFAULT_USER_ID,
           session_id=session_id,
           state={
               "title": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-              "model": "gemini/gemini-1.5-flash",
-              "sub_model": None,
-              "max_iterations": 30,
+              "model": DEFAULT_MODEL,
+              "sub_model": DEFAULT_SUB_MODEL,
+              "max_iterations": DEFAULT_MAX_ITERATIONS,
               "files": [],
               "conversation": [],  # List of {role, content, timestamp}
               "ui_events": [],  # Formatted events for UI
           },
       )
-      logger.info(f"Created session: {session.id}")
   except Exception as e:
     logger.exception(f"Error getting/creating session: {e}")
     await websocket.close(code=1011, reason=str(e))
@@ -388,12 +378,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "type": "status_response",
             "session_id": session.id,
             "title": session.state.get("title", "Untitled"),
-            "model": session.state.get("model", "gemini/gemini-1.5-flash"),
+            "model": session.state.get("model", DEFAULT_MODEL),
             "sub_model": (
                 session.state.get("sub_model")
-                or session.state.get("model", "gemini/gemini-1.5-flash")
+                or session.state.get("model", DEFAULT_MODEL)
             ),
-            "max_iterations": session.state.get("max_iterations", 30),
+            "max_iterations": session.state.get("max_iterations", DEFAULT_MAX_ITERATIONS),
             "files": session.state.get("files", []),
             "conversation": session.state.get("conversation", []),
             "events": session.state.get("ui_events", []),
@@ -413,11 +403,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 "type": "session_loaded",
                 "session_id": session.id,
                 "title": session.state.get("title", "Untitled"),
-                "model": session.state.get("model", "gemini/gemini-1.5-flash"),
+                "model": session.state.get("model", DEFAULT_MODEL),
                 "sub_model": (
                     session.state.get("sub_model") or session.state.get("model")
                 ),
-                "max_iterations": session.state.get("max_iterations", 30),
+                "max_iterations": session.state.get("max_iterations", DEFAULT_MAX_ITERATIONS),
                 "files": session.state.get("files", []),
                 "conversation": session.state.get("conversation", []),
                 "events": session.state.get("ui_events", []),
@@ -437,9 +427,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             session_id=new_session_id,
             state={
                 "title": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                "model": "gemini/gemini-1.5-flash",
+                "model": DEFAULT_MODEL,
                 "sub_model": None,
-                "max_iterations": 30,
+                "max_iterations": DEFAULT_MAX_ITERATIONS,
                 "files": [],
                 "conversation": [],
                 "ui_events": [],
@@ -494,7 +484,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
           })
 
   except WebSocketDisconnect:
-    pass  # Session already persisted
+    pass
 
 
 async def add_files(
@@ -541,8 +531,7 @@ async def run_query(websocket: WebSocket, session: Session, prompt: str):
       "timestamp": datetime.now().isoformat(),
   })
 
-  # Extract conversation history for the agent (exclude current message)
-  # Only include role and content, not timestamp
+  # Extract conversation history for the agent
   conversation_history = None
   if len(conversation) > 1:
     conversation_history = [
@@ -656,32 +645,26 @@ async def run_query(websocket: WebSocket, session: Session, prompt: str):
 
 
 def create_app(
-    model: str = "gemini/gemini-1.5-flash",
-    sub_model: str | None = None,
-    max_iterations: int = 30,
-    log_dir: str | None = None,
+    model: Optional[str] = None,
+    sub_model: Optional[str] = None,
+    max_iterations: Optional[int] = None,
+    log_dir: Optional[str] = None,
     db_url: str = "sqlite+aiosqlite:///./sessions.db",
 ) -> FastAPI:
   """Create a configured FastAPI app."""
   # Update module-level config
   _config["db_url"] = db_url
-  _config["model"] = model
-  _config["sub_model"] = sub_model
-  _config["max_iterations"] = max_iterations
-  _config["log_dir"] = log_dir
+  if model: _config["model"] = model
+  if sub_model: _config["sub_model"] = sub_model
+  if max_iterations: _config["max_iterations"] = max_iterations
+  if log_dir: _config["log_dir"] = log_dir
 
-  # Also store in app.state for easy access
-  app.state.default_model = model
-  app.state.default_sub_model = sub_model
-  app.state.default_max_iterations = max_iterations
-  app.state.default_log_dir = log_dir
   return app
 
 
 def main():
   """Run the web server."""
   import argparse
-
   import uvicorn
 
   parser = argparse.ArgumentParser(
@@ -703,21 +686,19 @@ def main():
       "--model",
       "-m",
       type=str,
-      default="gemini/gemini-1.5-flash",
-      help="Default model (default: gemini/gemini-1.5-flash)",
+      help="Default model",
   )
   parser.add_argument(
       "--sub-model",
       "-s",
       type=str,
-      help="Default sub-model (defaults to main model)",
+      help="Default sub-model",
   )
   parser.add_argument(
       "--max-iterations",
       "-i",
       type=int,
-      default=30,
-      help="Default max iterations (default: 30)",
+      help="Default max iterations",
   )
   parser.add_argument(
       "--log-dir",
@@ -744,15 +725,12 @@ def main():
   args = parser.parse_args()
 
   if args.reload:
-    # When using reload, set environment variables so config persists
-    # across module reimports
+    # Set environment variables for config persistence
     os.environ["RLM_DB_URL"] = args.db_url
-    os.environ["RLM_MODEL"] = args.model
-    os.environ["RLM_MAX_ITERATIONS"] = str(args.max_iterations)
-    if args.log_dir:
-      os.environ["RLM_LOG_DIR"] = args.log_dir
-    if args.sub_model:
-      os.environ["RLM_SUB_MODEL"] = args.sub_model
+    if args.model: os.environ["RLM_MODEL"] = args.model
+    if args.max_iterations: os.environ["RLM_MAX_ITERATIONS"] = str(args.max_iterations)
+    if args.log_dir: os.environ["RLM_LOG_DIR"] = args.log_dir
+    if args.sub_model: os.environ["RLM_SUB_MODEL"] = args.sub_model
 
     uvicorn.run(
         "adk_rlm.web:app",
@@ -761,8 +739,8 @@ def main():
         reload=True,
     )
   else:
-    # When not using reload, configure app directly
-    configured_app = create_app(
+    # Configure app directly
+    create_app(
         model=args.model,
         sub_model=args.sub_model,
         max_iterations=args.max_iterations,
@@ -771,7 +749,7 @@ def main():
     )
 
     uvicorn.run(
-        configured_app,
+        app,
         host=args.host,
         port=args.port,
     )

@@ -24,6 +24,7 @@ class RLMConfig:
 
     # Model settings
     default_model: str = "gemini/gemini-1.5-flash"
+    max_iterations: int = 30
 
     # Default Rate limiting (if not specified per provider)
     requests_per_minute: int = 60
@@ -77,7 +78,8 @@ class RLMConfig:
     def from_env(cls) -> "RLMConfig":
         """Create config from environment variables."""
         return cls(
-            default_model=os.getenv("RLM_DEFAULT_MODEL", "gemini/gemini-1.5-flash"),
+            default_model=os.getenv("RLM_MODEL", os.getenv("RLM_DEFAULT_MODEL", "gemini/gemini-1.5-flash")),
+            max_iterations=int(os.getenv("RLM_MAX_ITERATIONS", "30")),
             requests_per_minute=int(os.getenv("RLM_RPM", "60")),
             max_concurrent_requests=int(os.getenv("RLM_MAX_CONCURRENT", "30")),
             max_burst=int(os.getenv("RLM_MAX_BURST", "5")),
