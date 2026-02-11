@@ -20,6 +20,7 @@ wheels/
 original_rlm/
 plans/
 CLAUDE.md
+logs/
 .pytest_cache/
 sessions.db
 corpora/
