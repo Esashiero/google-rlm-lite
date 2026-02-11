@@ -161,23 +161,13 @@ def get_rate_limiter(provider: str = "default") -> TokenBucketRateLimiter:
 
     with _registry_lock:
         if provider not in _rate_limiters:
-            # Check for provider-specific config
-            if provider in config.provider_configs:
-                p_config = config.provider_configs[provider]
-                rpm = p_config.requests_per_minute
-                concurrent = p_config.max_concurrent
-                burst = p_config.max_burst
-            else:
-                # Use default config
-                rpm = config.requests_per_minute
-                concurrent = config.max_concurrent_requests
-                burst = config.max_burst
-
+            p_config = config.get_provider_config(provider)
             _rate_limiters[provider] = TokenBucketRateLimiter(
-                requests_per_minute=rpm,
-                max_concurrent=concurrent,
-                max_burst=burst,
+                requests_per_minute=p_config.requests_per_minute,
+                max_concurrent=p_config.max_concurrent,
+                max_burst=p_config.max_burst,
             )
+
         return _rate_limiters[provider]
 
 

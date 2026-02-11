@@ -2,12 +2,15 @@
 
 import os
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,7 +37,7 @@ class RLMConfig:
     # Provider-specific overrides
     # Example env var: RLM_PROVIDER_LIMITS='{"mistral": {"requests_per_minute": 30, "max_burst": 1}}'
     provider_configs: Dict[str, ProviderConfig] = field(default_factory=lambda: {
-        "mistral": ProviderConfig(requests_per_minute=30, max_burst=1, max_concurrent=2),
+        "mistral": ProviderConfig(requests_per_minute=20, max_burst=1, max_concurrent=1),
         "gemini": ProviderConfig(requests_per_minute=60, max_burst=5, max_concurrent=30),
     })
 
@@ -73,6 +76,20 @@ class RLMConfig:
                             setattr(self.provider_configs[provider], key, value)
             except Exception as e:
                 print(f"Error parsing RLM_PROVIDER_LIMITS: {e}")
+
+    def get_provider_config(self, provider: str) -> ProviderConfig:
+        """Get config for a specific provider, falling back to defaults."""
+        if provider in self.provider_configs:
+            config = self.provider_configs[provider]
+        else:
+            config = ProviderConfig(
+                requests_per_minute=self.requests_per_minute,
+                max_concurrent=self.max_concurrent_requests,
+                max_burst=self.max_burst
+            )
+
+        logger.info(f"Using config for {provider}: {config}")
+        return config
 
     @classmethod
     def from_env(cls) -> "RLMConfig":

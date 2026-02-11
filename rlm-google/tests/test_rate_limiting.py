@@ -177,7 +177,7 @@ class TestProviderSpecificLimits:
 
         assert limiter1 is not limiter2
         assert limiter1.requests_per_minute == 60
-        assert limiter2.requests_per_minute == 30
+        assert limiter2.requests_per_minute == 20
 
     def test_default_provider(self):
         """Test that unknown provider gets default limits."""

@@ -17,6 +17,10 @@ import logging as _logging
 
 # Configure library logging on import
 # Logs warnings and above to stderr by default
+import os as _os
+_log_level_str = _os.environ.get("RLM_LOG_LEVEL", "WARNING").upper()
+_log_level = getattr(_logging, _log_level_str, _logging.WARNING)
+
 _logger = _logging.getLogger(__name__)
 if not _logger.handlers:
   _handler = _logging.StreamHandler()
@@ -24,7 +28,7 @@ if not _logger.handlers:
       _logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
   )
   _logger.addHandler(_handler)
-  _logger.setLevel(_logging.WARNING)
+  _logger.setLevel(_log_level)
 
 
 def configure_logging(
