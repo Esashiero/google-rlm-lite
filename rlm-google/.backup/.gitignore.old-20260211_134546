@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# ADK generated files
+.adk/
+*/.adk/
+
+original_rlm/
+plans/
+CLAUDE.md
+.pytest_cache/
+corpora/
+.ruff_cache/
