@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+# Virtual environments
+.venv
+
 # ADK generated files
 .adk/
 */.adk/

@@ -204,7 +204,7 @@ class InteractiveCLI:
 
   def __init__(
       self,
-      model: str = "gemini-3-pro-preview",
+      model: str = "gemini/gemini-1.5-flash",
       sub_model: str | None = None,
       max_iterations: int = 30,
       verbose: bool = False,
@@ -1011,7 +1011,7 @@ class InteractiveCLI:
 
 
 async def run_interactive(
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini/gemini-1.5-flash",
     sub_model: str | None = None,
     max_iterations: int = 30,
     files: list[str] | None = None,
@@ -1053,7 +1053,7 @@ Examples:
   python -m adk_rlm.cli --files "./docs/**/*.md" "./data/*.csv"
 
   # Use a specific model
-  python -m adk_rlm.cli --model gemini-3-pro-preview
+  python -m adk_rlm.cli --model gemini/gemini-1.5-flash
 
   # Resume a specific session
   python -m adk_rlm.cli --session abc12345
@@ -1071,8 +1071,8 @@ Examples:
       "--model",
       "-m",
       type=str,
-      default="gemini-3-pro-preview",
-      help="Main model to use (default: gemini-3-pro-preview)",
+      default="gemini/gemini-1.5-flash",
+      help="Main model to use (default: gemini/gemini-1.5-flash)",
   )
   parser.add_argument(
       "--sub-model",

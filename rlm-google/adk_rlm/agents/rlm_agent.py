@@ -19,7 +19,7 @@ from adk_rlm.callbacks.code_execution import format_iteration
 from adk_rlm.code_executor import RLMCodeExecutor
 from adk_rlm.events import RLMEventData
 from adk_rlm.events import RLMEventType
-from adk_rlm.llm import AsyncLLMRateLimiter
+from adk_rlm.litellm_client import LiteLLMClient
 from adk_rlm.logging.rlm_logger import RLMLogger
 from adk_rlm.logging.verbose import VerbosePrinter
 from adk_rlm.prompts import build_rlm_system_prompt
@@ -34,10 +34,7 @@ from adk_rlm.usage import UsageTracker
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events.event import Event
-from google.genai import types
 from pydantic import PrivateAttr
-
-from google import genai
 
 
 class RLMAgent(BaseAgent):
@@ -50,7 +47,7 @@ class RLMAgent(BaseAgent):
   """
 
   # Pydantic model fields (public configuration)
-  model: str = "gemini-3-pro-preview"
+  model: str = "gemini/gemini-1.5-flash"
   sub_model: str | None = None
   max_iterations: int = 30
   max_depth: int = 5
@@ -60,7 +57,6 @@ class RLMAgent(BaseAgent):
 
   # Private attributes (not part of the model schema)
   _code_executor: RLMCodeExecutor | None = PrivateAttr(default=None)
-  _client: genai.Client | None = PrivateAttr(default=None)
   _usage_tracker: UsageTracker = PrivateAttr(default_factory=UsageTracker)
   _logger: RLMLogger | None = PrivateAttr(default=None)
   _parent_agent: str | None = PrivateAttr(default=None)
@@ -73,7 +69,7 @@ class RLMAgent(BaseAgent):
   def __init__(
       self,
       name: str = "rlm_agent",
-      model: str = "gemini-3-pro-preview",
+      model: str = "gemini/gemini-1.5-flash",
       sub_model: str | None = None,
       max_iterations: int = 30,
       max_depth: int = 5,
@@ -117,7 +113,6 @@ class RLMAgent(BaseAgent):
     )
 
     # Initialize private attributes
-    self._client = genai.Client(vertexai=True, location="global")
     self._usage_tracker = UsageTracker()
     self._logger = logger
     self._parent_agent = parent_agent
@@ -148,7 +143,7 @@ class RLMAgent(BaseAgent):
         root_model=self.model,
         max_depth=self.max_depth,
         max_iterations=self.max_iterations,
-        backend="gemini",
+        backend="litellm",
         backend_kwargs={"model_name": self.model},
         environment_type="local",
         environment_kwargs={},
@@ -157,87 +152,36 @@ class RLMAgent(BaseAgent):
         else None,
     )
 
-  def _prepare_contents(
-      self, prompt: list[dict[str, Any]]
-  ) -> tuple[list[types.Content], str | None]:
-    """Convert message history to Gemini format."""
-    system_instruction = None
-    contents = []
-
-    for msg in prompt:
-      role = msg.get("role")
-      content = msg.get("content", "")
-
-      if role == "system":
-        system_instruction = content
-      elif role == "user":
-        contents.append(
-            types.Content(role="user", parts=[types.Part(text=content)])
-        )
-      elif role == "assistant":
-        contents.append(
-            types.Content(role="model", parts=[types.Part(text=content)])
-        )
-
-    return contents, system_instruction
-
   async def _call_llm_async(self, message_history: list[dict[str, Any]]) -> str:
-    """Call the main LLM asynchronously."""
-    contents, system_instruction = self._prepare_contents(message_history)
+    """Call the main LLM asynchronously using LiteLLM."""
 
-    # Build config with function calling disabled to prevent MALFORMED_FUNCTION_CALL errors
-    # when the model tries to use tools that aren't configured
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tool_config=types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(mode="NONE")
-        ),
+    # Create LiteLLM client
+    client = LiteLLMClient(
+        model=self.model,
+        max_retries=5,
+        base_retry_delay=1.0,
     )
 
-    async with AsyncLLMRateLimiter():
-      response = await self._client.aio.models.generate_content(
-          model=self.model,
-          contents=contents,
-          config=config,
-      )
+    try:
+        # Pass the entire history to LiteLLM
+        response = await client.acompletion(
+            messages=message_history,
+            temperature=0.7
+        )
 
-    self._usage_tracker.add_from_response(self.model, response.usage_metadata)
+        # Track usage
+        if hasattr(response, "usage") and response.usage:
+            self._usage_tracker.add(
+                self.model,
+                input_tokens=getattr(response.usage, "prompt_tokens", 0),
+                output_tokens=getattr(response.usage, "completion_tokens", 0)
+            )
 
-    # Handle None/empty responses with detailed logging
-    if response.text is None or response.text == "":
-      # Extract debugging info from response
-      finish_reason = None
-      safety_ratings = None
-      block_reason = None
+        return response.choices[0].message.content
 
-      if response.candidates:
-        candidate = response.candidates[0]
-        finish_reason = getattr(candidate, "finish_reason", None)
-        safety_ratings = getattr(candidate, "safety_ratings", None)
-      if hasattr(response, "prompt_feedback"):
-        block_reason = getattr(response.prompt_feedback, "block_reason", None)
-
-      logger.warning(
-          "LLM returned empty response: model=%s, finish_reason=%s, "
-          "block_reason=%s, safety_ratings=%s, usage=%s",
-          self.model,
-          finish_reason,
-          block_reason,
-          safety_ratings,
-          response.usage_metadata,
-      )
-
-      # Return informative message instead of empty string
-      reason_parts = []
-      if finish_reason:
-        reason_parts.append(f"finish_reason={finish_reason}")
-      if block_reason:
-        reason_parts.append(f"block_reason={block_reason}")
-      reason_str = ", ".join(reason_parts) if reason_parts else "unknown reason"
-
-      return f"[LLM returned empty response: {reason_str}]"
-
-    return response.text
+    except Exception as e:
+        logger.warning("LiteLLM call failed: %s", e)
+        return f"[LLM query failed: {e}]"
 
   def _create_rlm_event(
       self,
